@@ -10,12 +10,13 @@
                     // -------------------------------------------------
                     // ------- Explanation of backend properties -------
                     // -------------------------------------------------
-                    // "url":          Your backend url
-                    // "priority":     Lower value means higher priority over other backends. 
-                    //                 If you have more one or more Priority 1 backends, they will always be used instead
-                    //                 of Priority 2 or higher. Higher values backends will only be used if your lower values (top priority) are all throttling.
-                    // "isThrottling": Indicates if this endpoint is returning 429 (Too many requests) currently
-                    // "retryAfter":   We use it to know when to mark this endpoint as healthy again after we received a 429 response
+                    // "url":               Your backend url
+                    // "priority":          Lower value means higher priority over other backends. 
+                    //                      If you have more one or more Priority 1 backends, they will always be used instead
+                    //                      of Priority 2 or higher. Higher values backends will only be used if your lower values (top priority) are all throttling.
+                    // "isThrottling":      Indicates if this endpoint is returning 429 (Too many requests) currently
+                    // "retryAfter":        We use it to know when to mark this endpoint as healthy again after we received a 429 response
+                    // "maxResponseTime":   We use it as a threshold for a desired response time
 
                     JArray backends = new JArray();
                     backends.Add(new JObject()
@@ -23,7 +24,8 @@
                         { "url", "https://andre-openai-eastus.openai.azure.com/" },
                         { "priority", 1},
                         { "isThrottling", false }, 
-                        { "retryAfter", DateTime.MinValue } 
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 } 
                     });
 
                     backends.Add(new JObject()
@@ -31,7 +33,8 @@
                         { "url", "https://andre-openai-eastus-2.openai.azure.com/" },
                         { "priority", 1},
                         { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue }
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 }
                     });
 
                     backends.Add(new JObject()
@@ -39,7 +42,8 @@
                         { "url", "https://andre-openai-northcentralus.openai.azure.com/" },
                         { "priority", 1},
                         { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue }
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 }
                     });
 
                     backends.Add(new JObject()
@@ -47,7 +51,8 @@
                         { "url", "https://andre-openai-canadaeast.openai.azure.com/" },
                         { "priority", 2},
                         { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue }
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 }
                     });
 
                     backends.Add(new JObject()
@@ -55,7 +60,8 @@
                         { "url", "https://andre-openai-francecentral.openai.azure.com/" },
                         { "priority", 3},
                         { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue }
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 }
                     });
 
                     backends.Add(new JObject()
@@ -63,7 +69,8 @@
                         { "url", "https://andre-openai-uksouth.openai.azure.com/" },
                         { "priority", 3},
                         { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue }
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 }
                     });
 
                     backends.Add(new JObject()
@@ -71,7 +78,8 @@
                         { "url", "https://andre-openai-westeurope.openai.azure.com/" },
                         { "priority", 3},
                         { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue }
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 }
                     });
 
                     backends.Add(new JObject()
@@ -79,7 +87,8 @@
                         { "url", "https://andre-openai-australia.openai.azure.com/" },
                         { "priority", 4},
                         { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue }
+                        { "retryAfter", DateTime.MinValue },
+                        { "maxResponseTime", 6000 }
                     });
 
                     return backends;   
@@ -94,6 +103,7 @@
         </set-header>
         <set-variable name="backendIndex" value="-1" />
         <set-variable name="remainingBackends" value="1" />
+        <set-variable name="startTime" value="@(DateTime.UtcNow)" />
     </inbound>
     <backend>
         <retry condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) && ((Int32)context.Variables["remainingBackends"]) > 0)" count="50" interval="0">
@@ -160,6 +170,7 @@
                 }
                 }" />
             <set-variable name="backendUrl" value="@(((JObject)((JArray)context.Variables["listBackends"])[(Int32)context.Variables["backendIndex"]]).Value<string>("url") + "/openai")" />
+            <set-variable name="selectedBackend" value="@(((JObject)((JArray)context.Variables["listBackends"])[(Int32)context.Variables["backendIndex"]]))" />
             <set-backend-service base-url="@((string)context.Variables["backendUrl"])" />
             <forward-request buffer-request-body="true" />
             <choose>
@@ -206,12 +217,67 @@
                         return remainingBackends;
                     }" />
                 </when>
+                <!--
+                    If the request is successful, check the time and compare it against
+                    the max response value. 
+                -->
+                <when condition="@(context.Response.StatusCode == 200)">
+                    <set-variable name="responseTime" value="@((DateTime.UtcNow - (DateTime)context.Variables["startTime"]).TotalMilliseconds)" />
+                    <set-variable name="slowResponse" value="@{
+                        bool slow = false;
+                        JObject selectedBackend = (JObject)context.Variables["selectedBackend"];                        
+                        bool maxResponseTimeSet = selectedBackend.Property("maxResponseTime") != null;
+                        if (maxResponseTimeSet)
+                        {
+                            Double responseTime = (Double)context.Variables["responseTime"];
+                            Double maxResponseTime = selectedBackend.Value<Double>("maxResponseTime");
+                            slow = responseTime > maxResponseTime;
+                        }                        
+                        return slow;
+                    }" />
+                    <choose>
+                        <!--
+                            Update the backend to reflect if the max response time 
+                            has been exceeded.
+                        -->
+                        <when condition="@((bool)context.Variables["slowResponse"] == true)">
+                            <set-variable name="listBackends" value="@{
+                                JArray backends = (JArray)context.Variables["listBackends"];
+                                int currentBackendIndex = context.Variables.GetValueOrDefault<int>("backendIndex");
+                                JObject backend = (JObject)backends[currentBackendIndex];
+                                backends[currentBackendIndex]["isThrottling"] = true;
+                                backends[currentBackendIndex]["retryAfter"] = DateTime.Now.AddSeconds(60);
+                                return backends; 
+                            }" />
+                            <cache-store-value key="listBackends" value="@((JArray)context.Variables["listBackends"])" duration="60" />
+                        </when>
+                    </choose>
+                </when>
             </choose>
         </retry>
     </backend>
     <outbound>
         <base />
-        <!-- This will return the used backend URL in the HTTP header response. Remove it if you don't want to expose this data -->
+        <set-header name="x-response-time-ms" exists-action="override">
+            <value>@{
+                var mms = (Double)context.Variables["responseTime"];
+                return mms.ToString();
+            }</value>
+        </set-header>
+        <choose>
+            <when condition="@(context.Variables.ContainsKey("slowResponse"))">
+                <set-header name="x-response-time-exceeded" exists-action="override">
+                    <value>@{        
+                        bool slow = false;     
+                        if (context.Variables.ContainsKey("slowResponse"))
+                        {
+                            slow = (bool)context.Variables["slowResponse"];                       
+                        }
+                        return slow.ToString();
+                    }</value>
+                </set-header>
+            </when>
+        </choose>
         <set-header name="x-openai-backendurl" exists-action="override">
             <value>@(context.Variables.GetValueOrDefault<string>("backendUrl", "none"))</value>
         </set-header>
