@@ -241,6 +241,7 @@
                             has been exceeded.
                         -->
                         <when condition="@((bool)context.Variables["slowResponse"] == true)">
+                            <cache-lookup-value key="listBackends" variable-name="listBackends" />
                             <set-variable name="listBackends" value="@{
                                 JArray backends = (JArray)context.Variables["listBackends"];
                                 int currentBackendIndex = context.Variables.GetValueOrDefault<int>("backendIndex");
