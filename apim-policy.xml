@@ -221,7 +221,7 @@
                     If the request is successful, check the time and compare it against
                     the max response value. 
                 -->
-                <when condition="@(context.Response.StatusCode == 200)">
+                <when condition="@(context.Response.StatusCode == 200 || context.Response.StatusCode == 400)">
                     <set-variable name="responseTime" value="@((DateTime.UtcNow - (DateTime)context.Variables["startTime"]).TotalMilliseconds)" />
                     <set-variable name="slowResponse" value="@{
                         bool slow = false;
