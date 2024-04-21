@@ -17,78 +17,27 @@
                     // "isThrottling":      Indicates if this endpoint is returning 429 (Too many requests) currently
                     // "retryAfter":        We use it to know when to mark this endpoint as healthy again after we received a 429 response
                     // "maxResponseTime":   We use it as a threshold for a desired response time
+                    // "deploymentNames":   A comma-separated list of the deployment names
 
                     JArray backends = new JArray();
                     backends.Add(new JObject()
                     {
-                        { "url", "https://andre-openai-eastus.openai.azure.com/" },
+                        { "url", "https://sprockets-backend100.openai.azure.com/" },
                         { "priority", 1},
                         { "isThrottling", false }, 
                         { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 } 
+                        { "maxResponseTime", 120000 },
+                        { "deploymentNames", "gpt-4, gpt-35-turbo, text-embedding-ada-002"}
                     });
 
                     backends.Add(new JObject()
                     {
-                        { "url", "https://andre-openai-eastus-2.openai.azure.com/" },
+                        { "url", "https://sprockets-backend2000.openai.azure.com/" },
                         { "priority", 1},
                         { "isThrottling", false },
                         { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 }
-                    });
-
-                    backends.Add(new JObject()
-                    {
-                        { "url", "https://andre-openai-northcentralus.openai.azure.com/" },
-                        { "priority", 1},
-                        { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 }
-                    });
-
-                    backends.Add(new JObject()
-                    {
-                        { "url", "https://andre-openai-canadaeast.openai.azure.com/" },
-                        { "priority", 2},
-                        { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 }
-                    });
-
-                    backends.Add(new JObject()
-                    {
-                        { "url", "https://andre-openai-francecentral.openai.azure.com/" },
-                        { "priority", 3},
-                        { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 }
-                    });
-
-                    backends.Add(new JObject()
-                    {
-                        { "url", "https://andre-openai-uksouth.openai.azure.com/" },
-                        { "priority", 3},
-                        { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 }
-                    });
-
-                    backends.Add(new JObject()
-                    {
-                        { "url", "https://andre-openai-westeurope.openai.azure.com/" },
-                        { "priority", 3},
-                        { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 }
-                    });
-
-                    backends.Add(new JObject()
-                    {
-                        { "url", "https://andre-openai-australia.openai.azure.com/" },
-                        { "priority", 4},
-                        { "isThrottling", false },
-                        { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 6000 }
+                        { "maxResponseTime", 120000 },
+                        { "deploymentNames", "gpt-4, gpt-35-turbo, text-embedding-ada-002, gpt-35-turbo-16k, gpt-4-32k"}                 
                     });
 
                     return backends;   
@@ -104,6 +53,7 @@
         <set-variable name="backendIndex" value="-1" />
         <set-variable name="remainingBackends" value="1" />
         <set-variable name="startTime" value="@(DateTime.UtcNow)" />
+        <set-variable name="deployment-id" value="@((string)context.Request.MatchedParameters["deployment-id"])" />
     </inbound>
     <backend>
         <retry condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) && ((Int32)context.Variables["remainingBackends"]) > 0)" count="50" interval="0">
@@ -124,31 +74,45 @@
 
                 return backends; 
             }" />
+            <!-- Update cache with the list of backends after checking for throttling updates -->
             <cache-store-value key="listBackends" value="@((JArray)context.Variables["listBackends"])" duration="60" />
-            <!-- This is the main logic to pick the backend to be used -->
-            <set-variable name="backendIndex" value="@{
+            <!-- Determine which backend to use -->
+            <set-variable name="backendIndex" value="@{                
                 JArray backends = (JArray)context.Variables["listBackends"];
-
+                string deploymentId = (string)context.Variables["deployment-id"];                   
                 int selectedPriority = Int32.MaxValue;
                 List<int> availableBackends = new List<int>();
+                int throttledBackend = -1;                         
 
                 for (int i = 0; i < backends.Count; i++)
                 {
                     JObject backend = (JObject)backends[i];
-
-                    if (!backend.Value<bool>("isThrottling"))
-                    {
-                        int backendPriority = backend.Value<int>("priority");
-
-                        if (backendPriority < selectedPriority)
+                    
+                    // Retrieve the list of deployed models for the selected backend
+                    string[] deploymentNames = backend.Value<string>("deploymentNames").Split(',').Select(s => s.Trim()).ToArray();
+                    
+                    // Make sure the model is deployed in the backend and isn't throttled
+                    if (Array.Exists(deploymentNames, element => element == deploymentId))                    
+                    {                        
+                        if (!backend.Value<bool>("isThrottling"))
                         {
-                            selectedPriority = backendPriority;
-                            availableBackends.Clear();
-                            availableBackends.Add(i);
-                        } 
-                        else if (backendPriority == selectedPriority)
+                            int backendPriority = backend.Value<int>("priority");
+                            if (backendPriority < selectedPriority)
+                            {
+                                selectedPriority = backendPriority;
+                                availableBackends.Clear();
+                                availableBackends.Add(i);
+                            } 
+                            else if (backendPriority == selectedPriority)
+                            {
+                                availableBackends.Add(i);
+                            }                            
+                        }
+                        else 
                         {
-                            availableBackends.Add(i);
+                           // Save the index of the throttled backend in case there aren't any 
+                           // others available.
+                           throttledBackend = i;
                         }
                     }
                 }
@@ -160,15 +124,24 @@
             
                 if (availableBackends.Count > 0)
                 {
-                    //Returns a random backend from the list if we have more than one available with the same priority
+                    // Returns a random backend from the list if we have more than one available with the same priority
                     return availableBackends[new Random().Next(0, availableBackends.Count)];
                 }
                 else
-                {
-                    //If there are no available backends, the request will be sent to the first one
-                    return 0;    
-                }
-                }" />
+                { 
+                    // Return the throttled backend as the last resort
+                    return throttledBackend; 
+                }                
+            }" />
+            <!-- Check to see if the backend index has been set and return a 404 if it hasn't -->
+            <choose>
+                <when condition="@(context.Variables.GetValueOrDefault<int>("backendIndex", -1) == -1)">
+                    <return-response>
+                        <set-status code="404" reason="DeploymentNotFound" />
+                        <set-body>@("No backends available for deployment " + (string)context.Variables["deployment-id"])</set-body>
+                    </return-response>
+                </when>
+            </choose>
             <set-variable name="backendUrl" value="@(((JObject)((JArray)context.Variables["listBackends"])[(Int32)context.Variables["backendIndex"]]).Value<string>("url") + "/openai")" />
             <set-variable name="selectedBackend" value="@(((JObject)((JArray)context.Variables["listBackends"])[(Int32)context.Variables["backendIndex"]]))" />
             <set-backend-service base-url="@((string)context.Variables["backendUrl"])" />
@@ -201,6 +174,7 @@
                     <cache-store-value key="listBackends" value="@((JArray)context.Variables["listBackends"])" duration="60" />
                     <set-variable name="remainingBackends" value="@{
                         JArray backends = (JArray)context.Variables["listBackends"];
+                        string deploymentId = (string)context.Variables["deployment-id"];
 
                         int remainingBackends = 0;
 
@@ -210,7 +184,11 @@
 
                             if (!backend.Value<bool>("isThrottling"))
                             {
-                                remainingBackends++;
+                                string[] deploymentNames = backend.Value<string>("deploymentNames").Split(',').Select(s => s.Trim()).ToArray();
+                                if (Array.Exists(deploymentNames, element => element == deploymentId))
+                                {                                
+                                    remainingBackends++;
+                                }
                             }
                         }
 
