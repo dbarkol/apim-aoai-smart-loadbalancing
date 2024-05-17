@@ -26,17 +26,17 @@
                         { "priority", 1},
                         { "isThrottling", false }, 
                         { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 120000 },
+                        { "maxResponseTime", 1200000 },
                         { "deploymentNames", "gpt-4, gpt-35-turbo, text-embedding-ada-002"}
                     });
 
                     backends.Add(new JObject()
                     {
-                        { "url", "https://sprockets-backend2000.openai.azure.com/" },
-                        { "priority", 1},
+                        { "url", "https://sprockets-backend200.openai.azure.com/" },
+                        { "priority", 2},
                         { "isThrottling", false },
                         { "retryAfter", DateTime.MinValue },
-                        { "maxResponseTime", 120000 },
+                        { "maxResponseTime", 1200000 },
                         { "deploymentNames", "gpt-4, gpt-35-turbo, text-embedding-ada-002, gpt-35-turbo-16k, gpt-4-32k"}                 
                     });
 
@@ -56,7 +56,7 @@
         <set-variable name="deployment-id" value="@((string)context.Request.MatchedParameters["deployment-id"])" />
     </inbound>
     <backend>
-        <retry condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) && ((Int32)context.Variables["remainingBackends"]) > 0)" count="50" interval="0">
+        <retry condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) && ((Int32)context.Variables["remainingBackends"]) > 0)" count="2" interval="0">
             <!-- Before picking the backend, let's verify if there is any that should be set to not throttling anymore -->
             <set-variable name="listBackends" value="@{
                 JArray backends = (JArray)context.Variables["listBackends"];
@@ -77,6 +77,7 @@
             <!-- Update cache with the list of backends after checking for throttling updates -->
             <cache-store-value key="listBackends" value="@((JArray)context.Variables["listBackends"])" duration="60" />
             <!-- Determine which backend to use -->
+            <cache-lookup-value key="listBackends" variable-name="listBackends" />
             <set-variable name="backendIndex" value="@{                
                 JArray backends = (JArray)context.Variables["listBackends"];
                 string deploymentId = (string)context.Variables["deployment-id"];                   
@@ -144,11 +145,11 @@
             </choose>
             <set-variable name="backendUrl" value="@(((JObject)((JArray)context.Variables["listBackends"])[(Int32)context.Variables["backendIndex"]]).Value<string>("url") + "/openai")" />
             <set-variable name="selectedBackend" value="@(((JObject)((JArray)context.Variables["listBackends"])[(Int32)context.Variables["backendIndex"]]))" />
-            <set-backend-service base-url="@((string)context.Variables["backendUrl"])" />
+            <set-backend-service base-url="@((string)context.Variables["backendUrl"])" />            
             <forward-request buffer-request-body="true" />
             <choose>
                 <!-- In case we got 429 or 5xx from a backend, update the list with its status -->
-                <when condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) )">
+                <when condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) )">           
                     <cache-lookup-value key="listBackends" variable-name="listBackends" />
                     <set-variable name="listBackends" value="@{
                         JArray backends = (JArray)context.Variables["listBackends"];
@@ -232,11 +233,11 @@
                         </when>
                     </choose>
                 </when>
-            </choose>
+            </choose>                        
         </retry>
     </backend>
     <outbound>
-        <base />
+        <base />      
         <set-header name="x-response-time-ms" exists-action="override">
             <value>@{
                 var mms = (Double)context.Variables["responseTime"];
@@ -263,5 +264,36 @@
     </outbound>
     <on-error>
         <base />
+        <choose>
+            <when condition="@(context.Response != null && context.Response.StatusCode >= 500)">
+                <cache-lookup-value key="listBackends" variable-name="listBackends" />
+                <set-variable name="listBackends" value="@{
+                    JArray backends = (JArray)context.Variables["listBackends"];
+                    int currentBackendIndex = context.Variables.GetValueOrDefault<int>("backendIndex");
+                    int retryAfter = Convert.ToInt32(context.Response.Headers.GetValueOrDefault("Retry-After", "-1"));
+
+                    if (retryAfter == -1)
+                    {
+                        retryAfter = Convert.ToInt32(context.Response.Headers.GetValueOrDefault("x-ratelimit-reset-requests", "-1"));
+                    }
+
+                    if (retryAfter == -1)
+                    {
+                        retryAfter = Convert.ToInt32(context.Response.Headers.GetValueOrDefault("x-ratelimit-reset-tokens", "10"));
+                    }
+
+                    JObject backend = (JObject)backends[currentBackendIndex];
+                    backend["isThrottling"] = true;
+                    backend["retryAfter"] = DateTime.Now.AddSeconds(retryAfter);
+
+                    return backends;      
+                }" />
+                <cache-store-value key="listBackends" value="@((JArray)context.Variables["listBackends"])" duration="60" />              
+                <return-response>
+                    <set-status code="500" reason="Internal Server Error" />
+                    <set-body>Sorry, the service is currently unavailable. Please try again later.</set-body>
+                </return-response>
+            </when>
+        </choose>            
     </on-error>
 </policies>
