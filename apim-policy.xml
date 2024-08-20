@@ -238,12 +238,6 @@
     </backend>
     <outbound>
         <base />      
-        <set-header name="x-response-time-ms" exists-action="override">
-            <value>@{
-                var mms = (Double)context.Variables["responseTime"];
-                return mms.ToString();
-            }</value>
-        </set-header>
         <choose>
             <when condition="@(context.Variables.ContainsKey("slowResponse"))">
                 <set-header name="x-response-time-exceeded" exists-action="override">
