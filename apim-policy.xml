@@ -54,6 +54,7 @@
         <set-variable name="remainingBackends" value="1" />
         <set-variable name="startTime" value="@(DateTime.UtcNow)" />
         <set-variable name="deployment-id" value="@((string)context.Request.MatchedParameters["deployment-id"])" />
+        <include-fragment fragment-id="log-aoai-requests" />
     </inbound>
     <backend>
         <retry condition="@(context.Response != null && (context.Response.StatusCode == 429 || context.Response.StatusCode >= 500) && ((Int32)context.Variables["remainingBackends"]) > 0)" count="2" interval="0">
@@ -201,6 +202,7 @@
                     the max response value. 
                 -->
                 <when condition="@(context.Response.StatusCode == 200 || context.Response.StatusCode == 400)">
+                    <include-fragment fragment-id="log-aoai-requests-outbound" />
                     <set-variable name="responseTime" value="@((DateTime.UtcNow - (DateTime)context.Variables["startTime"]).TotalMilliseconds)" />
                     <set-variable name="slowResponse" value="@{
                         bool slow = false;
